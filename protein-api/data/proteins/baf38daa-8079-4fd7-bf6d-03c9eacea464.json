@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "createdAt": "2025-02-11T07:20:16.215Z",
+    "updatedAt": "2025-02-11T07:21:47.994Z"
+  },
+  "data": {
+    "id": "baf38daa-8079-4fd7-bf6d-03c9eacea464",
+    "name": "Updated Protein",
+    "sequence": "MKVLWAALLV",
+    "description": "This is an updated protein description.",
+    "molecularWeight": 1305.6200000000001,
+    "createdAt": "2025-02-11T07:20:16.215Z",
+    "updatedAt": "2025-02-11T07:21:47.994Z"
+  }
+}
