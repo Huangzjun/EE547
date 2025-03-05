@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Search Results</title>
+    <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+    <h1>Search Results for "<%= query %>"</h1>
+    <table>
+        <tr>
+            <% if (type === 'album') { %>
+                <th>Album</th><th>Artist</th><th>Release Date</th>
+            <% } else if (type === 'track') { %>
+                <th>Track</th><th>Artist</th><th>Album</th><th>Duration</th>
+            <% } else { %>
+                <th>Artist</th><th>Genres</th>
+            <% } %>
+        </tr>
+        <% results.forEach(result => { %>
+            <tr>
+                <td><%= result.name %></td>
+                <td><%= result.artist %></td>
+                <td><%= result.releaseDate || result.genres || result.duration %></td>
+            </tr>
+        <% }) %>
+    </table>
+    <a href="/web">Back to Search</a>
+</body>
+</html>

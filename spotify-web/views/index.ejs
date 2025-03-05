@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Spotify Search</title>
+    <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+    <h1>Spotify Search</h1>
+    <form action="/web/search" method="GET">
+        <select name="type">
+            <option value="album">Albums</option>
+            <option value="track">Tracks</option>
+            <option value="artist">Artists</option>
+        </select>
+        <input type="text" name="query" placeholder="Search...">
+        <button type="submit">Search</button>
+    </form>
+</body>
+</html>
