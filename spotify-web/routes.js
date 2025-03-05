@@ -2,7 +2,7 @@ const express = require("express");
 const { SpotifyApi } = require("./spotifyApi");
 
 const router = express.Router();
-const accessToken = "your-access-token";  
+const accessToken = "BQAoMbFEoZiwn9SMJlWqSzT9MCTM88nkI_loQMZQgGrROYlRrWZE1toD8L9FKCpG2XTgqxtpNDa8dXd442-WdnkK_RtqOLoV7pRfp5cJCUULeNzalz777UDdcaVyTUINapFWXxLv33M";  
 const spotifyApi = new SpotifyApi(accessToken);
 
 router.get("/web", (req, res) => {
