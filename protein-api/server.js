@@ -1,15 +1,28 @@
-const express = require('express');
-const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
+const config = require('./src/config');
 
+const express = require('express');
+const { v4: uuidv4 } = require('uuid');
+const pool = require('./db'); 
+require('dotenv').config();
 const app = express();
-const PORT = 3000;
-const DATA_DIR = './data/proteins/'; 
-const INDEX_FILE = './data/proteins.json';
+const PORT = config.PORT;
+
 const MAX_PROTEIN_LENGTH = 2000;
+
+const fragmentRoutes = require('./src/routes/fragmentRoutes');
+const searchRoutes = require('./src/routes/searchRoutes');
 
 app.use(express.json());
 app.use(express.text());
+const pool = new Pool({
+    user: 'postgres',
+    host: 'localhost',
+    database: 'protein_db',
+    password: 'password',
+    port: 5432,
+});
+
 
 class NotFoundError extends Error {
     constructor(message) {
@@ -17,6 +30,7 @@ class NotFoundError extends Error {
         this.name = 'NotFoundError';
     }
 }
+
 
 class ConflictError extends Error {
     constructor(message) {
@@ -48,29 +62,22 @@ const gorPropensities = {
     V: { a: 1.06, b: 1.70, c: 0.41 }
 };
 
-function getProteins() {
-    if (!fs.existsSync(INDEX_FILE)) return { proteins: [] };
-    const data = fs.readFileSync(INDEX_FILE, 'utf8');
-    return data ? JSON.parse(data) : { proteins: [] };
+async function getProteins() {
+    const { rows } = await pool.query('SELECT id, name FROM proteins');
+    return rows;
 }
+
 
 function generateProteinId() {
     return uuidv4();
 }
 
-function getProteinSync(proteinId) {
-    const filePath = `${DATA_DIR}${proteinId}.json`;
-    if (!fs.existsSync(filePath)) {
-        throw new NotFoundError(`Protein with id ${proteinId} not found`);
-    }
-    const protein = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-
-    if (!protein.data || !protein.data.sequence) {
-        throw new Error(`Protein data is invalid for id ${proteinId}`);
-    }
-
-    return protein.data; 
+async function getProtein(proteinId) {
+    const { rows } = await pool.query('SELECT * FROM proteins WHERE id=$1', [proteinId]);
+    if (rows.length === 0) throw new NotFoundError(`Protein with id ${proteinId} not found`);
+    return rows[0];
 }
+
 
 function saveProteins(data) {
     fs.writeFileSync(INDEX_FILE, JSON.stringify(data, null, 2));
@@ -135,160 +142,229 @@ function generateStructureSVG(sequence, secondaryStructure) {
     return svg;
 }
 
-app.get('/api/proteins', (req, res, next) => {
+async function insertFragments(proteinId, sequence) {
+    const fragments = [];
+    for (let i = 0; i <= sequence.length - 5; i++) {
+        const fragment = sequence.substr(i, 5); // 截取5个字符
+        const id = uuidv4(); // fragment 也需要 uuid
+        const start = i; // 位置
+        fragments.push([id, proteinId, fragment, start]);
+    }
+
+    for (const [id, protein_id, fragment, start] of fragments) {
+        await pool.query(
+            'INSERT INTO fragments (id, protein_id, fragment, start) VALUES ($1, $2, $3, $4)',
+            [id, protein_id, fragment, start]
+        );
+    }
+}
+
+app.get('/api/proteins', async (req, res, next) => {
     try {
-        const proteins = getProteins().proteins;
-        res.json({ proteins, total: proteins.length });
-    } catch (error) {
-        next(error);
+        const limit = parseInt(req.query.limit) || 100;
+        const offset = parseInt(req.query.offset) || 0;
+        const result = await pool.query('SELECT * FROM proteins LIMIT $1 OFFSET $2', [limit, offset]);
+        const total = (await pool.query('SELECT COUNT(*) FROM proteins')).rows[0].count;
+        res.json({ proteins: result.rows, total: parseInt(total), limit, offset });
+    } catch (err) {
+        next(err);
     }
 });
 
-app.get('/api/proteins/:proteinId', (req, res, next) => {
+
+
+app.get('/api/proteins/:proteinId', async (req, res, next) => {
     try {
         const { proteinId } = req.params;
-        const protein = getProteinSync(proteinId);
-        res.json(protein);
-    } catch (error) {
-        next(error);
+        const result = await pool.query('SELECT * FROM proteins WHERE id = $1', [proteinId]);
+        if (result.rows.length === 0) throw new NotFoundError('Protein not found');
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
     }
 });
 
-app.post('/api/proteins', (req, res, next) => {
+
+
+app.post('/api/proteins', async (req, res, next) => {
     try {
-        let proteins = getProteins();
         const { name, sequence, description } = req.body;
+        if (!sequence || sequence.length > MAX_PROTEIN_LENGTH) throw new Error('Invalid protein sequence');
 
-        if (!sequence || sequence.length > MAX_PROTEIN_LENGTH) {
-            throw new Error('Invalid protein sequence');
-        }
+        const id = uuidv4();
+        const createdAt = new Date();
+        const molecularWeight = calculateMolecularWeight(sequence);
 
-        const proteinId = generateProteinId();
-        const newProtein = {
-            id: proteinId,
-            name: name || `Protein ${sequence.substring(0, 8)}`,
-            sequence: sequence.toUpperCase(),
-            description: description || "",
-            molecularWeight: calculateMolecularWeight(sequence),
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-        };
+        await pool.query(
+            `INSERT INTO proteins (id, name, sequence, description, molecular_weight, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+            [id, name || `Protein ${sequence.substring(0,8)}`, sequence, description || '', molecularWeight, createdAt]
+        );
 
-        proteins.proteins.push({ id: newProtein.id, name: newProtein.name });
-        saveProteins(proteins);
-        fs.writeFileSync(`${DATA_DIR}${proteinId}.json`, JSON.stringify({
-            metadata: { version: "1.0", createdAt: newProtein.createdAt, updatedAt: newProtein.updatedAt },
-            data: newProtein
-        }, null, 2));
-
-        res.status(201).json(newProtein);
-    } catch (error) {
-        next(error);
+        await insertFragments(proteinId, sequence);
+        res.status(201).json({ id, name, sequence, description, molecularWeight, createdAt, updatedAt: createdAt });
+    } catch (err) {
+        next(err);
     }
 });
 
-app.post('/api/proteins/sequence', (req, res, next) => {
+
+app.get('/api/proteins/:proteinId/motifs', async (req, res, next) => {
+    try {
+        const { proteinId } = req.params;
+        const protein = await getProtein(proteinId);
+        const sequence = protein.sequence;
+        const motifs = [];
+        for (let i = 0; i <= sequence.length - 5; i++) {
+            motifs.push(sequence.substring(i, i + 5));
+        }
+        res.json({ motifs });
+    } catch (error) { next(error); }
+});
+
+app.get('/api/motifs/:motif', async (req, res, next) => {
+    try {
+        const { motif } = req.params;
+        if (motif.length !== 5) throw new Error('Motif must be exactly 5 characters');
+        const { rows } = await pool.query('SELECT * FROM proteins WHERE sequence LIKE $1', [`%${motif}%`]);
+        res.json({ proteins: rows });
+    } catch (error) { next(error); }
+});
+
+
+app.post('/api/proteins/sequence', async (req, res, next) => {
     try {
         const sequence = req.body.trim().toUpperCase();
-        if (!sequence || sequence.length > MAX_PROTEIN_LENGTH) {
-            throw new Error('Invalid sequence: Must be non-empty and ≤ 2000 characters');
-        }
+        if (!sequence || sequence.length > MAX_PROTEIN_LENGTH) throw new Error('Invalid sequence');
 
+        const id = uuidv4();
         const timestamp = Math.floor(Date.now() / 1000);
-        const name = `Protein ${sequence.substring(0, 8)} ${timestamp}`;
-        const proteinId = generateProteinId();
-        const newProtein = {
-            id: proteinId,
-            name,
-            sequence,
-            description: "",
-            molecularWeight: calculateMolecularWeight(sequence),
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-        };
+        const name = `Protein ${sequence.substring(0,8)} ${timestamp}`;
+        const createdAt = new Date();
+        const molecularWeight = calculateMolecularWeight(sequence);
 
-        let proteins = getProteins();
-        proteins.proteins.push({ id: newProtein.id, name: newProtein.name });
-        saveProteins(proteins);
-        fs.writeFileSync(`${DATA_DIR}${proteinId}.json`, JSON.stringify({
-            metadata: { version: "1.0", createdAt: newProtein.createdAt, updatedAt: newProtein.updatedAt },
-            data: newProtein
-        }, null, 2));
+        await pool.query(
+            `INSERT INTO proteins (id, name, sequence, description, molecular_weight, created_at, updated_at)
+             VALUES ($1, $2, $3, '', $4, $5, $5)`,
+            [id, name, sequence, molecularWeight, createdAt]
+        );
 
-        res.status(201).json(newProtein);
-    } catch (error) {
-        next(error);
+        await insertFragments(proteinId, sequence);
+        res.status(201).json({ id, name, sequence, description: '', molecularWeight, createdAt, updatedAt: createdAt });
+    } catch (err) {
+        next(err);
     }
 });
 
-app.put('/api/proteins/:proteinId', (req, res, next) => {
+
+app.put('/api/proteins/:proteinId', async (req, res, next) => {
     try {
         const { proteinId } = req.params;
         const { name, description } = req.body;
+        const updatedAt = new Date();
 
-        let proteinData = getProteinSync(proteinId);
-        let updatedProtein = proteinData.data;
+        const result = await pool.query('SELECT * FROM proteins WHERE id = $1', [proteinId]);
+        if (result.rows.length === 0) throw new NotFoundError('Protein not found');
 
-        if (name) updatedProtein.name = name;
-        if (description) updatedProtein.description = description;
-        updatedProtein.updatedAt = new Date().toISOString();
+        const updatedName = name || result.rows[0].name;
+        const updatedDescription = description || result.rows[0].description;
 
-        fs.writeFileSync(`${DATA_DIR}${proteinId}.json`, JSON.stringify({
-            metadata: { version: "1.0", createdAt: proteinData.metadata.createdAt, updatedAt: updatedProtein.updatedAt },
-            data: updatedProtein
-        }, null, 2));
+        await pool.query(
+            `UPDATE proteins SET name = $1, description = $2, updated_at = $3 WHERE id = $4`,
+            [updatedName, updatedDescription, updatedAt, proteinId]
+        );
 
-        let proteins = getProteins();
-        let proteinIndex = proteins.proteins.findIndex(p => p.id === proteinId);
-        proteins.proteins[proteinIndex].name = updatedProtein.name;
-        saveProteins(proteins);
-
-        res.json(updatedProtein);
-    } catch (error) {
-        next(error);
+        res.json({ ...result.rows[0], name: updatedName, description: updatedDescription, updatedAt });
+    } catch (err) {
+        next(err);
     }
 });
 
-app.delete('/api/proteins/:proteinId', (req, res, next) => {
+
+app.delete('/api/proteins/:proteinId', async (req, res, next) => {
     try {
         const { proteinId } = req.params;
-        let proteins = getProteins();
-        const proteinIndex = proteins.proteins.findIndex(p => p.id === proteinId);
-
-        if (proteinIndex === -1) throw new NotFoundError('Protein not found');
-
-        proteins.proteins.splice(proteinIndex, 1);
-        saveProteins({ proteins });
-
-        const filePath = `${DATA_DIR}${proteinId}.json`;
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
-
+        const result = await pool.query('DELETE FROM proteins WHERE id = $1 RETURNING *', [proteinId]);
+        if (result.rowCount === 0) throw new NotFoundError('Protein not found');
         res.status(204).end();
+    } catch (err) {
+        next(err);
+    }
+});
+
+
+
+app.get('/api/proteins/:proteinId/structure', async (req, res, next) => {
+    try {
+        const { proteinId } = req.params;
+        const protein = await getProtein(proteinId); // 改成 await
+        const structure = predictSecondaryStructure(protein.sequence);
+        if (req.accepts('json')) {
+            res.json(structure);
+        } else if (req.accepts('svg')) {
+            const svg = generateStructureSVG(protein.sequence, structure.secondaryStructure);
+            res.type('svg').send(svg);
+        } else {
+            res.status(406).json({ error: 'Not Acceptable' });
+        }
     } catch (error) {
         next(error);
     }
 });
 
-app.get('/api/proteins/:proteinId/structure', (req, res) => {
+app.get('/api/fragments', async (req, res, next) => {
     try {
-    const { proteinId } = req.params;
-    const protein = getProteinSync(proteinId);
-    const structure = predictSecondaryStructure(protein.sequence);
-    if (req.accepts('json')) {
-    res.json(structure);
-    } else if (req.accepts('svg')) {
-    const svg = generateStructureSVG(protein.sequence, structure.
-    secondaryStructure);
-    res.type('svg').send(svg);
-    } else {
-    res.status(406).json({ error: 'Not Acceptable' });
+        const { motif } = req.query;
+        if (!motif || motif.length !== 5) throw new Error('motif must be 5 characters');
+
+        const result = await pool.query(
+            'SELECT * FROM fragments WHERE fragment = $1',
+            [motif]
+        );
+        res.json({ fragments: result.rows });
+    } catch (err) {
+        next(err);
     }
-    } catch (error) {
-    res.status(400).json({ error: error.message });
+});
+
+app.get('/api/search', async (req, res, next) => {
+    try {
+        const { query } = req.query;
+        if (!query) throw new Error('query is required');
+
+        const result = await pool.query(
+            `SELECT * FROM proteins WHERE name ILIKE $1 OR description ILIKE $1`,
+            [`%${query}%`]
+        );
+        res.json({ proteins: result.rows });
+    } catch (err) {
+        next(err);
     }
-    });
+});
+
+app.get('/api/proteins/:proteinId/structure', async (req, res, next) => {
+    try {
+        const { proteinId } = req.params;
+        const result = await pool.query('SELECT * FROM proteins WHERE id = $1', [proteinId]);
+        if (result.rows.length === 0) throw new NotFoundError('Protein not found');
+
+        const sequence = result.rows[0].sequence;
+        const structure = predictSecondaryStructure(sequence);
+
+        if (req.accepts('json')) {
+            res.json({ proteinId, sequence, ...structure });
+        } else if (req.accepts('svg')) {
+            const svg = generateStructureSVG(sequence, structure.secondaryStructure);
+            res.type('svg').send(svg);
+        } else {
+            res.status(406).json({ error: 'Not Acceptable' });
+        }
+    } catch (err) {
+        next(err);
+    }
+});
+
+
 
 function errorHandler(err, req, res, next) {
     console.error(err);
@@ -307,6 +383,9 @@ app.use(errorHandler);
 function initializeServer() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     if (!fs.existsSync(INDEX_FILE)) fs.writeFileSync(INDEX_FILE, JSON.stringify({ proteins: [] }, null, 2));
+
+    app.use('/api/proteins', fragmentRoutes); 
+    app.use('/api/search', searchRoutes);    
 
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
